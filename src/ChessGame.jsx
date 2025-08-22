@@ -117,6 +117,7 @@ const ChessGame = () => {
         </button>
       </div>
 
+      
       <div style={moveLogStyle}>
         <h2 style={{ marginBottom: '15px', fontSize: '18px' }}>Move History</h2>
         <div style={moveListStyle}>
