@@ -11,7 +11,7 @@ const ChessGame = () => {
       try {
         const data = JSON.parse(saved);
         const chess = new Chess();
-        data.history.forEach((m) => chess.move(m));
+        (data.history || []).forEach((m) => chess.move(m));
         return chess;
       } catch (e) {
         console.error("Error loading saved game:", e);
@@ -60,7 +60,8 @@ const ChessGame = () => {
   const [selectedSquare, setSelectedSquare] = useState(null);
   const [legalMoves, setLegalMoves] = useState([]);
 
-  // 🔹 Save to sessionStorage whenever game or logs/captures change
+  const [pendingPromotion, setPendingPromotion] = useState(null);
+
   useEffect(() => {
     const history = game.history({ verbose: true });
     sessionStorage.setItem(
@@ -69,7 +70,16 @@ const ChessGame = () => {
     );
   }, [game, moveLog, capturedWhite, capturedBlack]);
 
-  // Chess symbols helper
+  const promoSymbol = (type, color) => {
+    const map = {
+      q: { w: "♕", b: "♛" },
+      r: { w: "♖", b: "♜" },
+      b: { w: "♗", b: "♝" },
+      n: { w: "♘", b: "♞" },
+    };
+    return map[type][color];
+  };
+
   const pieceSymbol = (piece, color, key) => {
     const symbols = {
       p: { w: "♙", b: "♟" },
@@ -86,7 +96,44 @@ const ChessGame = () => {
     );
   };
 
-  // Drag & drop moves
+  const recordMoveEffects = (move) => {
+    setMoveLog((log) => [
+      ...log,
+      `${move.color === "w" ? "White" : "Black"}: ${move.san}`,
+    ]);
+    if (move.captured) {
+      if (move.color === "w") {
+        setCapturedWhite((prev) => [...prev, move.captured]);
+      } else {
+        setCapturedBlack((prev) => [...prev, move.captured]);
+      }
+    }
+    setSelectedSquare(null);
+    setLegalMoves([]);
+  };
+
+  const finishPromotion = (promotionPiece) => {
+    const { from, to } = pendingPromotion || {};
+    if (!from || !to) {
+      setPendingPromotion(null);
+      return;
+    }
+
+    setGame((prev) => {
+      const next = new Chess();
+      prev.history({ verbose: true }).forEach((m) => next.move(m));
+
+      const move = next.move({ from, to, promotion: promotionPiece });
+      if (move) {
+        recordMoveEffects(move);
+        setPendingPromotion(null);
+        return next;
+      }
+      setPendingPromotion(null);
+      return prev;
+    });
+  };
+
   const onDrop = useCallback((sourceSquare, targetSquare) => {
     let moveMade = false;
 
@@ -99,6 +146,18 @@ const ChessGame = () => {
       const piece = next.get(sourceSquare);
       if (!piece || piece.color !== next.turn()) return prev;
 
+      const legalFrom = next.moves({ square: sourceSquare, verbose: true });
+      const isPromotion = legalFrom.some(
+        (m) => m.to === targetSquare && m.promotion
+      );
+      if (isPromotion) {
+        setPendingPromotion({ from: sourceSquare, to: targetSquare, color: piece.color });
+        setSelectedSquare(null);
+        setLegalMoves([]);
+        moveMade = false;
+        return prev;
+      }
+
       const move = next.move({
         from: sourceSquare,
         to: targetSquare,
@@ -106,22 +165,7 @@ const ChessGame = () => {
       });
 
       if (move) {
-        setMoveLog((log) => [
-          ...log,
-          `${move.color === "w" ? "White" : "Black"}: ${move.san}`,
-        ]);
-
-        // track captures
-        if (move.captured) {
-          if (move.color === "w") {
-            setCapturedWhite((prev) => [...prev, move.captured]);
-          } else {
-            setCapturedBlack((prev) => [...prev, move.captured]);
-          }
-        }
-
-        setSelectedSquare(null);
-        setLegalMoves([]);
+        recordMoveEffects(move);
         moveMade = true;
         return next;
       }
@@ -131,7 +175,6 @@ const ChessGame = () => {
     return moveMade;
   }, []);
 
-  // Tap-to-move handler
   const handleSquareClick = (square) => {
     if (game.isGameOver()) return;
 
@@ -163,6 +206,14 @@ const ChessGame = () => {
     const next = new Chess();
     game.history({ verbose: true }).forEach((m) => next.move(m));
 
+    const legalFrom = next.moves({ square: selectedSquare, verbose: true });
+    const promoNeeded = legalFrom.some((m) => m.to === square && m.promotion);
+    if (promoNeeded) {
+      const p = game.get(selectedSquare);
+      setPendingPromotion({ from: selectedSquare, to: square, color: p?.color || toMove });
+      return;
+    }
+
     const move = next.move({
       from: selectedSquare,
       to: square,
@@ -171,21 +222,7 @@ const ChessGame = () => {
 
     if (move) {
       setGame(next);
-      setMoveLog((log) => [
-        ...log,
-        `${move.color === "w" ? "White" : "Black"}: ${move.san}`,
-      ]);
-
-      if (move.captured) {
-        if (move.color === "w") {
-          setCapturedWhite((prev) => [...prev, move.captured]);
-        } else {
-          setCapturedBlack((prev) => [...prev, move.captured]);
-        }
-      }
-
-      setSelectedSquare(null);
-      setLegalMoves([]);
+      recordMoveEffects(move);
     }
   };
 
@@ -197,8 +234,6 @@ const ChessGame = () => {
       const undone = next.undo();
       if (undone) {
         setMoveLog((m) => m.slice(0, -1));
-
-        // Remove last captured piece if any
         if (undone.captured) {
           if (undone.color === "w") {
             setCapturedWhite((prev) => prev.slice(0, -1));
@@ -206,9 +241,9 @@ const ChessGame = () => {
             setCapturedBlack((prev) => prev.slice(0, -1));
           }
         }
-
         setSelectedSquare(null);
         setLegalMoves([]);
+        setPendingPromotion(null);
         return next;
       }
       return prev;
@@ -223,6 +258,7 @@ const ChessGame = () => {
     setCapturedBlack([]);
     setSelectedSquare(null);
     setLegalMoves([]);
+    setPendingPromotion(null);
     sessionStorage.removeItem(STORAGE_KEY);
   };
 
@@ -233,7 +269,7 @@ const ChessGame = () => {
       if (game.isStalemate()) return "Stalemate!";
       return "Game Over!";
     }
-    if (game.isCheck()) return "Check!";
+    if (game.inCheck()) return "Check!";
     return `${game.turn() === "w" ? "White" : "Black"} to move`;
   };
 
@@ -277,25 +313,9 @@ const ChessGame = () => {
     fontSize: "20px",
     marginBottom: "15px",
     textAlign: "center",
-    color: game.isCheck() ? "#d32f2f" : "#333",
+    color: game.inCheck() ? "#d32f2f" : "#333",
   };
 
-  // // Highlight styles
-  // const highlightStyles = {};
-  // if (selectedSquare) {
-  //   highlightStyles[selectedSquare] = {
-  //     backgroundColor: "rgba(255, 215, 0, 0.6)",
-  //   };
-  // }
-  // legalMoves.forEach((sq) => {
-  //   highlightStyles[sq] = {
-  //     background:
-  //       "radial-gradient(circle, rgba(0,0,0,0.3) 20%, transparent 20%)",
-  //     borderRadius: "50%",
-  //   };
-  // });
-
-    // Highlight styles
   const highlightStyles = {};
   if (selectedSquare) {
     highlightStyles[selectedSquare] = {
@@ -323,13 +343,47 @@ const ChessGame = () => {
         }
       }
     }
-
     if (kingSquare) {
       highlightStyles[kingSquare] = {
         backgroundColor: "rgba(255, 0, 0, 0.6)",
       };
     }
   }
+
+  const overlayStyle = {
+    position: "fixed",
+    inset: 0,
+    background: "rgba(0,0,0,0.5)",
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "center",
+    zIndex: 9999,
+  };
+  const modalStyle = {
+    background: "rgba(119, 153, 82, 0.9)",
+    padding: "16px",
+    borderRadius: "8px",
+    width: "280px",
+    boxShadow: "0 10px 30px rgba(0,0,0,0.3)",
+    textAlign: "center",
+  };
+  const promoRowStyle = { display: "flex", gap: "10px", justifyContent: "center", margin: "10px 0" };
+  const promoBtnStyle = {
+    fontSize: "28px",
+    padding: "8px 12px",
+    borderRadius: "8px",
+    border: "1px solid #ddd",
+    cursor: "pointer",
+    background: "#f7f7f7",
+  };
+  const cancelBtnStyle = {
+    marginTop: "8px",
+    padding: "6px 10px",
+    borderRadius: "6px",
+    border: "none",
+    cursor: "pointer",
+    background: "#eee",
+  };
 
   return (
     <div style={containerStyle}>
@@ -359,7 +413,6 @@ const ChessGame = () => {
           </div>
         </div>
 
-        {/* Buttons row */}
         <div style={{ display: "flex", gap: "10px", marginTop: "15px" }}>
           <button
             onClick={resetGame}
@@ -406,6 +459,24 @@ const ChessGame = () => {
           )}
         </div>
       </div>
+
+      {pendingPromotion && (
+        <div style={overlayStyle} onClick={() => setPendingPromotion(null)}>
+          <div style={modalStyle} onClick={(e) => e.stopPropagation()}>
+            <div style={{ fontWeight: 600 }}>Promote to?</div>
+            <div style={promoRowStyle}>
+              {["q", "r", "b", "n"].map((t) => (
+                <button key={t} style={promoBtnStyle} onClick={() => finishPromotion(t)}>
+                  {promoSymbol(t, pendingPromotion.color)}
+                </button>
+              ))}
+            </div>
+            <button style={cancelBtnStyle} onClick={() => setPendingPromotion(null)}>
+              Cancel
+            </button>
+          </div>
+        </div>
+      )}
     </div>
   );
 };
