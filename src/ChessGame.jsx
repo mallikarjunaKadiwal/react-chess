@@ -1,26 +1,31 @@
-import { useState, useCallback, useEffect } from "react";
+import { useState, useCallback, useEffect, useRef } from "react";
 import { Chessboard } from "react-chessboard";
 import { Chess } from "chess.js";
 
 const STORAGE_KEY = "chessGame";
 
 const ChessGame = () => {
-  const [game, setGame] = useState(() => {
+  // Keep the mutable Chess instance in a ref — never directly in React state.
+  const chessRef = useRef(new Chess());
+
+  // Initialize fen and other saved arrays from sessionStorage (if present).
+  const [fen, setFen] = useState(() => {
     const saved = sessionStorage.getItem(STORAGE_KEY);
-    const chess = new Chess();
     if (saved) {
       try {
         const data = JSON.parse(saved);
         if (data.fen) {
-          chess.load(data.fen);
+          chessRef.current.load(data.fen);
+          return data.fen;
         } else if (data.pgn) {
-          chess.loadPgn(data.pgn);
+          chessRef.current.loadPgn(data.pgn);
+          return chessRef.current.fen();
         }
       } catch (e) {
         console.error("Error loading saved game:", e);
       }
     }
-    return chess;
+    return chessRef.current.fen();
   });
 
   const [moveLog, setMoveLog] = useState(() => {
@@ -63,20 +68,25 @@ const ChessGame = () => {
   const [legalMoves, setLegalMoves] = useState([]);
   const [pendingPromotion, setPendingPromotion] = useState(null);
 
-  // persist game safely
+  // persist only serializable data
   useEffect(() => {
-    sessionStorage.setItem(
-      STORAGE_KEY,
-      JSON.stringify({
-        fen: game.fen(),
-        pgn: game.pgn(),
-        moveLog,
-        capturedWhite,
-        capturedBlack,
-      })
-    );
-  }, [game, moveLog, capturedWhite, capturedBlack]);
+    try {
+      sessionStorage.setItem(
+        STORAGE_KEY,
+        JSON.stringify({
+          fen,
+          pgn: chessRef.current.pgn(),
+          moveLog,
+          capturedWhite,
+          capturedBlack,
+        })
+      );
+    } catch (e) {
+      console.error("Error saving game to sessionStorage:", e);
+    }
+  }, [fen, moveLog, capturedWhite, capturedBlack]);
 
+  // helper icons
   const promoSymbol = (type, color) => {
     const map = {
       q: { w: "♕", b: "♛" },
@@ -103,7 +113,7 @@ const ChessGame = () => {
     );
   };
 
-  const recordMoveEffects = (move) => {
+  const recordMoveEffects = useCallback((move) => {
     setMoveLog((log) => [
       ...log,
       `${move.color === "w" ? "White" : "Black"}: ${move.san}`,
@@ -117,82 +127,80 @@ const ChessGame = () => {
     }
     setSelectedSquare(null);
     setLegalMoves([]);
-  };
+  }, []);
 
-  const finishPromotion = (promotionPiece) => {
-    const { from, to } = pendingPromotion || {};
-    if (!from || !to) {
-      setPendingPromotion(null);
-      return;
-    }
-
-    setGame((prev) => {
-      const next = new Chess();
-      next.load(prev.fen());
-
-      const move = next.move({ from, to, promotion: promotionPiece });
-      if (move) {
-        recordMoveEffects(move);
+  const finishPromotion = useCallback(
+    (promotionPiece) => {
+      const { from, to } = pendingPromotion || {};
+      if (!from || !to) {
+        setPendingPromotion(null);
+        return;
+      }
+      const game = chessRef.current;
+      try {
+        const move = game.move({ from, to, promotion: promotionPiece });
+        if (move) {
+          setFen(game.fen());
+          recordMoveEffects(move);
+        }
+      } catch (e) {
+        console.error("Error finishing promotion:", e);
       }
       setPendingPromotion(null);
-      return next;
-    });
-  };
+    },
+    [pendingPromotion, recordMoveEffects]
+  );
 
   const onDrop = useCallback(
     (sourceSquare, targetSquare) => {
-      let moveMade = false;
+      const game = chessRef.current;
+
+      // quick guard
+      if (!game) return false;
+      if (game.isGameOver()) return false;
+
       try {
-        setGame((prev) => {
-          const next = new Chess();
-          next.load(prev.fen());
+        const piece = game.get(sourceSquare);
+        if (!piece || piece.color !== game.turn()) return false;
 
-          if (next.isGameOver()) return prev;
-
-          const piece = next.get(sourceSquare);
-          if (!piece || piece.color !== next.turn()) {
-            return prev; // invalid source
-          }
-
-          const legalFrom = next.moves({ square: sourceSquare, verbose: true });
-          const isPromotion = legalFrom.some(
-            (m) => m.to === targetSquare && m.promotion
-          );
-          if (isPromotion) {
-            setPendingPromotion({
-              from: sourceSquare,
-              to: targetSquare,
-              color: piece.color,
-            });
-            setSelectedSquare(null);
-            setLegalMoves([]);
-            return prev;
-          }
-
-          const move = next.move({
+        const legalFrom = game.moves({ square: sourceSquare, verbose: true });
+        const isPromotion = legalFrom.some(
+          (m) => m.to === targetSquare && m.promotion
+        );
+        if (isPromotion) {
+          setPendingPromotion({
             from: sourceSquare,
             to: targetSquare,
-            promotion: "q",
+            color: piece.color,
           });
+          setSelectedSquare(null);
+          setLegalMoves([]);
+          return false;
+        }
 
-          if (move) {
-            recordMoveEffects(move);
-            moveMade = true;
-            return next;
-          }
-
-          return prev;
+        const move = game.move({
+          from: sourceSquare,
+          to: targetSquare,
+          promotion: "q",
         });
+
+        if (move) {
+          setFen(game.fen());
+          recordMoveEffects(move);
+          return true;
+        }
       } catch (err) {
+        // don't crash — log and ignore
         console.error("Invalid move attempt:", err);
       }
-      return moveMade;
+      return false;
     },
     [recordMoveEffects]
   );
 
   const handleSquareClick = (square) => {
-    if (game.isGameOver()) return;
+    const game = chessRef.current;
+    if (!game || game.isGameOver()) return;
 
     const piece = game.get(square);
     const toMove = game.turn();
@@ -219,40 +227,45 @@ const ChessGame = () => {
       return;
     }
 
-    const next = new Chess();
-    next.load(game.fen());
+    try {
+      const legalFrom = game.moves({
+        square: selectedSquare,
+        verbose: true,
+      });
+      const promoNeeded = legalFrom.some(
+        (m) => m.to === square && m.promotion
+      );
+      if (promoNeeded) {
+        const p = game.get(selectedSquare);
+        setPendingPromotion({
+          from: selectedSquare,
+          to: square,
+          color: p?.color || toMove,
+        });
+        return;
+      }
 
-    const legalFrom = next.moves({ square: selectedSquare, verbose: true });
-    const promoNeeded = legalFrom.some((m) => m.to === square && m.promotion);
-    if (promoNeeded) {
-      const p = game.get(selectedSquare);
-      setPendingPromotion({
+      const move = game.move({
         from: selectedSquare,
         to: square,
-        color: p?.color || toMove,
+        promotion: "q",
       });
-      return;
-    }
-
-    const move = next.move({
-      from: selectedSquare,
-      to: square,
-      promotion: "q",
-    });
-
-    if (move) {
-      setGame(next);
-      recordMoveEffects(move);
+      if (move) {
+        setFen(game.fen());
+        recordMoveEffects(move);
+      }
+    } catch (e) {
+      console.error("handleSquareClick error:", e);
     }
   };
 
-  const undoMove = () => {
-    setGame((prev) => {
-      const next = new Chess();
-      next.load(prev.fen());
-
-      const undone = next.undo();
+  // Undo logic
+  const undoMove = useCallback(() => {
+    const game = chessRef.current;
+    try {
+      const undone = game.undo();
       if (undone) {
+        setFen(game.fen());
         setMoveLog((m) => m.slice(0, -1));
         if (undone.captured) {
           if (undone.color === "w") {
@@ -261,28 +274,36 @@ const ChessGame = () => {
             setCapturedBlack((prev) => prev.slice(0, -1));
           }
         }
-        setSelectedSquare(null);
-        setLegalMoves([]);
-        setPendingPromotion(null);
-        return next;
       }
-      return prev;
-    });
-  };
+    } catch (e) {
+      console.error("undoMove error:", e);
+    }
+    setSelectedSquare(null);
+    setLegalMoves([]);
+    setPendingPromotion(null);
+  }, []);
 
-  const resetGame = () => {
-    const fresh = new Chess();
-    setGame(fresh);
+  // Reset the whole game
+  const resetGame = useCallback(() => {
+    chessRef.current = new Chess();
+    setFen(chessRef.current.fen());
     setMoveLog([]);
     setCapturedWhite([]);
     setCapturedBlack([]);
     setSelectedSquare(null);
     setLegalMoves([]);
     setPendingPromotion(null);
-    sessionStorage.removeItem(STORAGE_KEY);
-  };
+    try {
+      sessionStorage.removeItem(STORAGE_KEY);
+    } catch (e) {
+      console.error("Error clearing storage:", e);
+    }
+  }, []);
 
+  // Game status derived from chessRef
   const getGameStatus = () => {
+    const game = chessRef.current;
+    if (!game) return "";
     if (game.isGameOver()) {
       if (game.isCheckmate()) return "Checkmate!";
       if (game.isDraw()) return "Draw!";
@@ -293,6 +314,7 @@ const ChessGame = () => {
     return `${game.turn() === "w" ? "White" : "Black"} to move`;
   };
 
+  // UI styles (kept same as your original)
   const containerStyle = {
     maxWidth: "1200px",
     margin: "0 auto",
@@ -333,9 +355,10 @@ const ChessGame = () => {
     fontSize: "20px",
     marginBottom: "15px",
     textAlign: "center",
-    color: game.inCheck() ? "#d32f2f" : "#333",
+    color: chessRef.current && chessRef.current.inCheck() ? "#d32f2f" : "#333",
   };
 
+  // Square highlight styles
   const highlightStyles = {};
   if (selectedSquare) {
     highlightStyles[selectedSquare] = {
@@ -350,13 +373,14 @@ const ChessGame = () => {
     };
   });
 
-  if (game.inCheck() || game.isCheckmate()) {
-    const board = game.board();
+  // highlight king if in check / checkmate
+  if (chessRef.current && (chessRef.current.inCheck() || chessRef.current.isCheckmate())) {
+    const board = chessRef.current.board();
     let kingSquare = null;
     for (let row = 0; row < 8; row++) {
       for (let col = 0; col < 8; col++) {
         const piece = board[row][col];
-        if (piece && piece.type === "k" && piece.color === game.turn()) {
+        if (piece && piece.type === "k" && piece.color === chessRef.current.turn()) {
           const file = "abcdefgh"[col];
           const rank = 8 - row;
           kingSquare = `${file}${rank}`;
@@ -415,7 +439,7 @@ const ChessGame = () => {
       <div style={boardContainerStyle}>
         <div style={statusStyle}>{getGameStatus()}</div>
         <Chessboard
-          position={game.fen()}
+          position={fen}
           onPieceDrop={onDrop}
           onSquareClick={handleSquareClick}
           customBoardStyle={{
@@ -467,25 +491,14 @@ const ChessGame = () => {
       </div>
 
       <div style={moveLogStyle}>
-        <h2 style={{ marginBottom: "15px", fontSize: "18px" }}>
-          Move History
-        </h2>
+        <h2 style={{ marginBottom: "15px", fontSize: "18px" }}>Move History</h2>
         <div style={moveListStyle}>
           {moveLog.length > 0 ? (
-            moveLog
-              .reduce((rows, move, i) => {
-                if (i % 2 === 0) {
-                  rows.push([move]); // White move starts new row
-                } else {
-                  rows[rows.length - 1].push(move); // Black move added
-                }
-                return rows;
-              }, [])
-              .map((pair, rowIndex) => (
-                <div key={rowIndex} style={moveItemStyle}>
-                  {`${rowIndex + 1}. ${pair[0]} ${pair[1] || ""}`}
-                </div>
-              ))
+            moveLog.map((move, index) => (
+              <div key={index} style={moveItemStyle}>
+                {`${Math.floor(index / 2) + 1}. ${move}`}
+              </div>
+            ))
           ) : (
             <div
               style={{ textAlign: "center", color: "#666", fontStyle: "italic" }}
@@ -502,19 +515,12 @@ const ChessGame = () => {
             <div style={{ fontWeight: 600 }}>Promote to?</div>
             <div style={promoRowStyle}>
               {["q", "r", "b", "n"].map((t) => (
-                <button
-                  key={t}
-                  style={promoBtnStyle}
-                  onClick={() => finishPromotion(t)}
-                >
+                <button key={t} style={promoBtnStyle} onClick={() => finishPromotion(t)}>
                   {promoSymbol(t, pendingPromotion.color)}
                 </button>
               ))}
             </div>
-            <button
-              style={cancelBtnStyle}
-              onClick={() => setPendingPromotion(null)}
-            >
+            <button style={cancelBtnStyle} onClick={() => setPendingPromotion(null)}>
               Cancel
             </button>
           </div>
