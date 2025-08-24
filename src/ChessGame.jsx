@@ -7,25 +7,27 @@ const STORAGE_KEY = "chessGame";
 const ChessGame = () => {
   const [game, setGame] = useState(() => {
     const saved = sessionStorage.getItem(STORAGE_KEY);
+    const chess = new Chess();
     if (saved) {
       try {
         const data = JSON.parse(saved);
-        const chess = new Chess();
-        (data.history || []).forEach((m) => chess.move(m));
-        return chess;
+        if (data.fen) {
+          chess.load(data.fen);
+        } else if (data.pgn) {
+          chess.loadPgn(data.pgn);
+        }
       } catch (e) {
         console.error("Error loading saved game:", e);
       }
     }
-    return new Chess();
+    return chess;
   });
 
   const [moveLog, setMoveLog] = useState(() => {
     const saved = sessionStorage.getItem(STORAGE_KEY);
     if (saved) {
       try {
-        const data = JSON.parse(saved);
-        return data.moveLog || [];
+        return JSON.parse(saved).moveLog || [];
       } catch {
         return [];
       }
@@ -59,14 +61,19 @@ const ChessGame = () => {
 
   const [selectedSquare, setSelectedSquare] = useState(null);
   const [legalMoves, setLegalMoves] = useState([]);
-
   const [pendingPromotion, setPendingPromotion] = useState(null);
 
+  // persist game safely
   useEffect(() => {
-    const history = game.history({ verbose: true });
     sessionStorage.setItem(
       STORAGE_KEY,
-      JSON.stringify({ history, moveLog, capturedWhite, capturedBlack })
+      JSON.stringify({
+        fen: game.fen(),
+        pgn: game.pgn(),
+        moveLog,
+        capturedWhite,
+        capturedBlack,
+      })
     );
   }, [game, moveLog, capturedWhite, capturedBlack]);
 
@@ -121,59 +128,68 @@ const ChessGame = () => {
 
     setGame((prev) => {
       const next = new Chess();
-      prev.history({ verbose: true }).forEach((m) => next.move(m));
+      next.load(prev.fen());
 
       const move = next.move({ from, to, promotion: promotionPiece });
       if (move) {
         recordMoveEffects(move);
-        setPendingPromotion(null);
-        return next;
       }
       setPendingPromotion(null);
-      return prev;
+      return next;
     });
   };
 
-  const onDrop = useCallback((sourceSquare, targetSquare) => {
-    let moveMade = false;
+  const onDrop = useCallback(
+    (sourceSquare, targetSquare) => {
+      let moveMade = false;
+      try {
+        setGame((prev) => {
+          const next = new Chess();
+          next.load(prev.fen());
 
-    setGame((prev) => {
-      const next = new Chess();
-      prev.history({ verbose: true }).forEach((m) => next.move(m));
+          if (next.isGameOver()) return prev;
 
-      if (next.isGameOver()) return prev;
+          const piece = next.get(sourceSquare);
+          if (!piece || piece.color !== next.turn()) {
+            return prev; // invalid source
+          }
 
-      const piece = next.get(sourceSquare);
-      if (!piece || piece.color !== next.turn()) return prev;
+          const legalFrom = next.moves({ square: sourceSquare, verbose: true });
+          const isPromotion = legalFrom.some(
+            (m) => m.to === targetSquare && m.promotion
+          );
+          if (isPromotion) {
+            setPendingPromotion({
+              from: sourceSquare,
+              to: targetSquare,
+              color: piece.color,
+            });
+            setSelectedSquare(null);
+            setLegalMoves([]);
+            return prev;
+          }
 
-      const legalFrom = next.moves({ square: sourceSquare, verbose: true });
-      const isPromotion = legalFrom.some(
-        (m) => m.to === targetSquare && m.promotion
-      );
-      if (isPromotion) {
-        setPendingPromotion({ from: sourceSquare, to: targetSquare, color: piece.color });
-        setSelectedSquare(null);
-        setLegalMoves([]);
-        moveMade = false;
-        return prev;
+          const move = next.move({
+            from: sourceSquare,
+            to: targetSquare,
+            promotion: "q",
+          });
+
+          if (move) {
+            recordMoveEffects(move);
+            moveMade = true;
+            return next;
+          }
+
+          return prev;
+        });
+      } catch (err) {
+        console.error("Invalid move attempt:", err);
       }
-
-      const move = next.move({
-        from: sourceSquare,
-        to: targetSquare,
-        promotion: "q",
-      });
-
-      if (move) {
-        recordMoveEffects(move);
-        moveMade = true;
-        return next;
-      }
-      return prev;
-    });
-
-    return moveMade;
-  }, []);
+      return moveMade;
+    },
+    [recordMoveEffects]
+  );
 
   const handleSquareClick = (square) => {
     if (game.isGameOver()) return;
@@ -204,13 +220,17 @@ const ChessGame = () => {
     }
 
     const next = new Chess();
-    game.history({ verbose: true }).forEach((m) => next.move(m));
+    next.load(game.fen());
 
     const legalFrom = next.moves({ square: selectedSquare, verbose: true });
     const promoNeeded = legalFrom.some((m) => m.to === square && m.promotion);
     if (promoNeeded) {
       const p = game.get(selectedSquare);
-      setPendingPromotion({ from: selectedSquare, to: square, color: p?.color || toMove });
+      setPendingPromotion({
+        from: selectedSquare,
+        to: square,
+        color: p?.color || toMove,
+      });
       return;
     }
 
@@ -229,7 +249,7 @@ const ChessGame = () => {
   const undoMove = () => {
     setGame((prev) => {
       const next = new Chess();
-      prev.history({ verbose: true }).forEach((m) => next.move(m));
+      next.load(prev.fen());
 
       const undone = next.undo();
       if (undone) {
@@ -367,7 +387,12 @@ const ChessGame = () => {
     boxShadow: "0 10px 30px rgba(0,0,0,0.3)",
     textAlign: "center",
   };
-  const promoRowStyle = { display: "flex", gap: "10px", justifyContent: "center", margin: "10px 0" };
+  const promoRowStyle = {
+    display: "flex",
+    gap: "10px",
+    justifyContent: "center",
+    margin: "10px 0",
+  };
   const promoBtnStyle = {
     fontSize: "28px",
     padding: "8px 12px",
@@ -442,14 +467,25 @@ const ChessGame = () => {
       </div>
 
       <div style={moveLogStyle}>
-        <h2 style={{ marginBottom: "15px", fontSize: "18px" }}>Move History</h2>
+        <h2 style={{ marginBottom: "15px", fontSize: "18px" }}>
+          Move History
+        </h2>
         <div style={moveListStyle}>
           {moveLog.length > 0 ? (
-            moveLog.map((move, index) => (
-              <div key={index} style={moveItemStyle}>
-                {`${Math.floor(index / 2) + 1}. ${move}`}
-              </div>
-            ))
+            moveLog
+              .reduce((rows, move, i) => {
+                if (i % 2 === 0) {
+                  rows.push([move]); // White move starts new row
+                } else {
+                  rows[rows.length - 1].push(move); // Black move added
+                }
+                return rows;
+              }, [])
+              .map((pair, rowIndex) => (
+                <div key={rowIndex} style={moveItemStyle}>
+                  {`${rowIndex + 1}. ${pair[0]} ${pair[1] || ""}`}
+                </div>
+              ))
           ) : (
             <div
               style={{ textAlign: "center", color: "#666", fontStyle: "italic" }}
@@ -466,12 +502,19 @@ const ChessGame = () => {
             <div style={{ fontWeight: 600 }}>Promote to?</div>
             <div style={promoRowStyle}>
               {["q", "r", "b", "n"].map((t) => (
-                <button key={t} style={promoBtnStyle} onClick={() => finishPromotion(t)}>
+                <button
+                  key={t}
+                  style={promoBtnStyle}
+                  onClick={() => finishPromotion(t)}
+                >
                   {promoSymbol(t, pendingPromotion.color)}
                 </button>
               ))}
             </div>
-            <button style={cancelBtnStyle} onClick={() => setPendingPromotion(null)}>
+            <button
+              style={cancelBtnStyle}
+              onClick={() => setPendingPromotion(null)}
+            >
               Cancel
             </button>
           </div>
